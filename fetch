@@ -387,11 +387,16 @@ case $platform in
         fi
         ;;
     linux)
-        for b in /sys/class/power_supply/BAT*; do
+        # Any battery-type supply; node names vary (BAT0, bq27426-0, max170xx...).
+        for b in /sys/class/power_supply/*; do
             [ -r "$b/capacity" ] || continue
-            bat_pct=$(cat "$b/capacity")
-            st=$(cat "$b/status" 2>/dev/null)
-            battery="${bat_pct}% [${st}]"
+            _typ=$(cat "$b/type" 2>/dev/null)
+            [ -z "$_typ" ] || [ "$_typ" = "Battery" ] || continue
+            bat_pct=$(cat "$b/capacity" 2>/dev/null)
+            [ -n "$bat_pct" ] || continue
+            _st=$(cat "$b/status" 2>/dev/null)
+            battery="${bat_pct}%"
+            [ -n "$_st" ] && battery="$battery [${_st}]"
             break
         done
         ;;
@@ -404,26 +409,26 @@ case $platform in
 esac
 
 # ---------------------------------------------------------------------------
-# Disk
+# Disk — whole *physical* disks, not just mounted filesystems
 # ---------------------------------------------------------------------------
 disk=
 d_pct=
-dftmp= basetmp=
+dftmp= lstmp=
 if has mktemp; then
     dftmp=$(mktemp "${TMPDIR:-/tmp}/minifetch.df.XXXXXX")
-    basetmp=$(mktemp "${TMPDIR:-/tmp}/minifetch.base.XXXXXX")
+    lstmp=$(mktemp "${TMPDIR:-/tmp}/minifetch.ls.XXXXXX")
 fi
 
+_rows=""
 if [ -n "$dftmp" ]; then
-    # Real, device-backed filesystems only. We use plain POSIX `df -kP` (the
-    # `-l` flag is missing from BusyBox) and drop pseudo/credential mounts.
+    # Real, device-backed filesystems only. Plain `df -kP` (BusyBox has no -l);
+    # drop pseudo/credential mounts under /run,/dev,/sys,/proc,/tmp.
     df -kP 2>/dev/null \
         | grep '^/dev/' \
         | grep -vE ' /(run|dev|sys|proc|tmp)(/| |$)' > "$dftmp"
 
     # De-duplicate the same device mounted more than once (bind mounts).
-    _seen=""
-    _lines=""
+    _seen="" _lines=""
     while read -r _dev _tot _used _avail _cap _mnt; do
         [ -n "$_dev" ] || continue
         case "$_seen" in *"|$_dev|"*) continue ;; esac
@@ -433,28 +438,80 @@ if [ -n "$dftmp" ]; then
     done < "$dftmp"
     printf '%s' "$_lines" > "$dftmp"
 
-    # Collect the unique whole-disk bases.
-    _bases=""
-    while read -r _dev _tot _rest; do
-        [ -n "$_dev" ] || continue
-        _b=$(disk_base "$_dev")
-        case "|$_bases|" in *"|$_b|"*) ;; *) _bases="$_bases|$_b|" ;; esac
-    done < "$dftmp"
-    printf '%s\n' "$_bases" | tr '|' '\n' | grep -v '^$' > "$basetmp"
-
-    # Sum each physical disk's partitions into "pct|base|usedGiB|totalGiB".
-    _rows=""
-    while IFS= read -r _base; do
-        _tot=0 _used=0
-        while read -r _dev _t _u _a _c _m; do
-            [ "$(disk_base "$_dev")" = "$_base" ] || continue
-            _tot=$(( _tot + _t ))
-            _used=$(( _used + _u ))
-        done < "$dftmp"
-        [ "$_tot" -gt 0 ] 2>/dev/null || continue
-        _rows="$_rows$(( _used * 100 / _tot ))|$_base|$(idiv1 "$_used" 1048576)|$(idiv1 "$_tot" 1048576)
+    # Physical disks (Linux): whole-device size, so unallocated space and LVM
+    # volumes are all accounted for. mmcblk*boot0/1 and loop/ram/dm are skipped.
+    _disks="" _ndisks=0
+    if [ "$platform" = linux ] && has lsblk && lsblk -b -l -n -o NAME,SIZE,TYPE >/dev/null 2>&1; then
+        lsblk -b -l -n -o NAME,SIZE,TYPE 2>/dev/null > "$lstmp"
+        while read -r _name _size _type; do
+            [ "$_type" = disk ] || continue
+            case $_name in
+                loop*|ram*|zram*|sr*|fd*|dm-*|md*|nbd*|rbd*) continue ;;
+                *boot[0-9]) continue ;;
+            esac
+            _disks="$_disks$_name|$_size
 "
-    done < "$basetmp"
+        done < "$lstmp"
+        _ndisks=$(printf '%s\n' "$_disks" | grep -c .)
+    fi
+
+    if [ "$_ndisks" -ge 1 ]; then
+        # Attribute each filesystem's used KiB to the whole disk it lives on
+        # (LVM volumes and loop images are resolved via lsblk/losetup).
+        _umap=""
+        while read -r _dev _tot _used _avail _cap _mnt; do
+            [ -n "$_dev" ] || continue
+            _dn=$(lsblk -s -l -n -o NAME "$_dev" 2>/dev/null | tail -n1)
+            case $_dn in
+                loop*)
+                    _back=$(losetup -a 2>/dev/null | sed -n "s#^/dev/$_dn:.*(\(.*\))\$#\1#p" | head -n1)
+                    [ -n "$_back" ] && _dn=$(lsblk -s -l -n -o NAME "$_back" 2>/dev/null | tail -n1)
+                    ;;
+            esac
+            if [ "$_ndisks" = 1 ]; then
+                _dn=$(printf '%s\n' "$_disks" | sed -n 's/|.*//p' | head -n1)
+            fi
+            _umap="$_umap$_dn|$_used
+"
+        done < "$dftmp"
+
+        while IFS='|' read -r _name _size; do
+            [ -n "$_name" ] || continue
+            [ "$_size" -gt 0 ] 2>/dev/null || continue
+            _u=0
+            while IFS='|' read -r _mn _mu; do
+                [ "$_mn" = "$_name" ] && _u=$(( _u + _mu ))
+            done <<EOFU
+$_umap
+EOFU
+            _pct=$(( _u * 1024 * 100 / _size ))
+            [ "$_pct" -gt 100 ] && _pct=100
+            _rows="$_rows$_pct|/dev/$_name|$(idiv1 $(( _u * 1024 )) 1073741824)|$(idiv1 "$_size" 1073741824)
+"
+        done <<EOFD
+$_disks
+EOFD
+    else
+        # Portable fallback: group partitions by whole-disk base name (df only).
+        _bases=""
+        while read -r _dev _tot _rest; do
+            [ -n "$_dev" ] || continue
+            _b=$(disk_base "$_dev")
+            case "|$_bases|" in *"|$_b|"*) ;; *) _bases="$_bases|$_b|" ;; esac
+        done < "$dftmp"
+        printf '%s\n' "$_bases" | tr '|' '\n' | grep -v '^$' > "$lstmp"
+        while IFS= read -r _base; do
+            _tot=0 _used=0
+            while read -r _dev _t _u _a _c _m; do
+                [ "$(disk_base "$_dev")" = "$_base" ] || continue
+                _tot=$(( _tot + _t ))
+                _used=$(( _used + _u ))
+            done < "$dftmp"
+            [ "$_tot" -gt 0 ] 2>/dev/null || continue
+            _rows="$_rows$(( _used * 100 / _tot ))|$_base|$(idiv1 "$_used" 1048576)|$(idiv1 "$_tot" 1048576)
+"
+        done < "$lstmp"
+    fi
 
     _n=$(printf '%s\n' "$_rows" | grep -c .)
     while IFS='|' read -r _pct _base _ug _tg; do
@@ -468,12 +525,12 @@ if [ -n "$dftmp" ]; then
 "
         fi
         d_pct=$_pct
-    done <<EOF
+    done <<EOFR
 $_rows
-EOF
+EOFR
     disk=$(printf '%s' "$disk")
 
-    rm -f "$dftmp" "$basetmp"
+    rm -f "$dftmp" "$lstmp"
 fi
 
 # ---------------------------------------------------------------------------
@@ -490,7 +547,24 @@ case $platform in
         ;;
     linux)
         if has ip; then
-            ip=$(ip -4 addr show scope global 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -n1)
+            # Prefer a wired or wireless NIC; avoid usb-gadget/docker/tailscale.
+            _addrs=$(ip -4 -o addr show scope global 2>/dev/null \
+                | sed -n 's/^[0-9][0-9]*:[[:space:]]*\([^ ]*\)[[:space:]]*inet \([0-9.]*\).*/\1 \2/p')
+            _best="" _bestrank=99
+            while read -r _if _a; do
+                [ -n "$_if" ] || continue
+                case $_if in
+                    lo) continue ;;
+                    eth*|en*|em*)   _r=1 ;;
+                    wlan*|wl*|wls*) _r=2 ;;
+                    usb*|docker*|br-*|veth*|tun*|tap*|tailscale*|wwan*|ppp*|virbr*|vmnet*|vnet*|dummy*|zt*) _r=8 ;;
+                    *)              _r=5 ;;
+                esac
+                if [ "$_r" -lt "$_bestrank" ]; then _bestrank=$_r; _best=$_a; fi
+            done <<EOFIP
+$_addrs
+EOFIP
+            ip=$_best
         fi
         ;;
 esac
@@ -558,9 +632,9 @@ fi
 }
 
 # ---------------------------------------------------------------------------
-# Side logo (fastfetch style)
+# Side logo (fastfetch style) — art chosen by OS
 # ---------------------------------------------------------------------------
-logo_art=$(cat <<'LOGO'
+_logo_apple=$(cat <<'LOGOAPPLE'
                     c.'
                  ,xNMM.
                .OMMMMo
@@ -578,8 +652,33 @@ logo_art=$(cat <<'LOGO'
     kMMMMMMMMMMMMMMMMMMMMMMd
      ;KMMMMMMMWXXWMMMMMMMk.
        "cooc*"    "*coo'
-LOGO
+LOGOAPPLE
 )
+
+_logo_tux=$(cat <<'LOGOTUX'
+       .--.
+      |o_o |
+      |:_/ |
+     //   \ \
+    (|     | )
+   /'\_   _/`\
+   \___)=(___/
+LOGOTUX
+)
+
+_logo_generic=$(cat <<'LOGOGEN'
+    .--------.
+    |  >_    |
+    |        |
+    '--------'
+LOGOGEN
+)
+
+case $platform in
+    ios|macos) logo_art=$_logo_apple;   logo_color="${E}[1;32m" ;;
+    linux)     logo_art=$_logo_tux;     logo_color="${E}[1m" ;;
+    *)         logo_art=$_logo_generic; logo_color="${E}[1m" ;;
+esac
 
 # Resolve auto logo setting.
 if [ -z "$use_logo" ]; then
@@ -615,7 +714,7 @@ if [ -n "$infof" ]; then
     exec 4<"$infof"
     while IFS= read -r l <&3; do
         if IFS= read -r i <&4; then :; else i=; fi
-        printf '%s%s%s' "$C_LOGO" "$l" "$RESET"
+        printf '%s%s%s' "$logo_color" "$l" "$RESET"
         printf '%*s' $(( logow - ${#l} + 2 )) ''
         printf '%s\n' "$i"
     done

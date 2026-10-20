@@ -40,11 +40,16 @@ touch). It has no runtime dependencies and no configuration files.
 - Device-aware output: on iOS it maps the machine identifier (`iPad3,4`, …) to a
   friendly model name, SoC (CPU) and GPU.
 - Memory, battery (with charge level + cycle count) and local IP.
-- Disk usage aggregated across **all** local filesystems, grouped per physical
-  disk — so an iOS device reports its full capacity (root + data partition),
-  and machines with several disks get one line each.
+- Disk usage reported per **whole physical device** (Linux via `lsblk`,
+  iOS/other via `df`), so unallocated space and LVM volumes are included. An
+  iOS device therefore reports its full capacity, and machines with several
+  disks get one line each.
 - Colored, aligned fields and unicode progress bars.
-- Optional Apple-style side logo (auto-enabled on wide interactive terminals).
+- Side logo chosen by OS (Apple on iOS/macOS, Tux on Linux, generic otherwise).
+- Prefers a wired/wireless NIC for the local IP on Linux (skips usb-gadget,
+  docker, tailscale, …).
+- Battery is detected from any `/sys/class/power_supply/*` node of type
+  `Battery` on Linux (not just `BAT*`).
 - Works on iOS, macOS, Linux and other Unix-likes with graceful fallbacks.
 - Fast: ~1s on an iPad 4 (Apple A6X).
 
