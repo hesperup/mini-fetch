@@ -9,6 +9,12 @@ runs on systems where Bash, Perl, Python or a recent `awk` are unavailable —
 including **legacy iOS / iPhone OS devices** (jailbroken iPhone / iPad / iPod
 touch). It has no runtime dependencies and no configuration files.
 
+> **Note:** All of the code in this project was written by AI. It is only meant
+> for tinkering with the devices at home, and will **not** be maintained or
+> updated.
+>
+> **说明：** 本项目代码全部由 AI 编写，仅用于折腾家中的设备，**不维护、不更新**。
+
 ```
                     c.'         mobile@roots-iPad
                  ,xNMM.         ─────────────────
