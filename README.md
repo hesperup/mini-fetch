@@ -23,7 +23,7 @@ touch). It has no runtime dependencies and no configuration files.
 .MMMMMMMMMMMMMMMMMMMMMMMMX.     GPU       PowerVR SGX554MP4
  kMMMMMMMMMMMMMMMMMMMMMMMMWd.   Memory    ███░░░░░░░░░░░ 221MiB / 987MiB
  'XMMMMMMMMMMMMMMMMMMMMMMMMMMk  Battery   ███████░░░░░░░ 57% (140 cycles)
-  'XMMMMMMMMMMMMMMMMMMMMMMMMK.  Disk      ████████████░░ 2.1GiB / 2.4GiB (87%)
+  'XMMMMMMMMMMMMMMMMMMMMMMMMK.  Disk      ████████████░░ 8.8GiB / 14.7GiB (59%)
     kMMMMMMMMMMMMMMMMMMMMMMd    Local IP  192.168.31.70
      ;KMMMMMMMWXXWMMMMMMMk.
        "cooc*"    "*coo'
@@ -33,7 +33,10 @@ touch). It has no runtime dependencies and no configuration files.
 
 - Device-aware output: on iOS it maps the machine identifier (`iPad3,4`, …) to a
   friendly model name, SoC (CPU) and GPU.
-- Memory, battery (with charge level + cycle count), disk and local IP.
+- Memory, battery (with charge level + cycle count) and local IP.
+- Disk usage aggregated across **all** local filesystems, grouped per physical
+  disk — so an iOS device reports its full capacity (root + data partition),
+  and machines with several disks get one line each.
 - Colored, aligned fields and unicode progress bars.
 - Optional Apple-style side logo (auto-enabled on wide interactive terminals).
 - Works on iOS, macOS, Linux and other Unix-likes with graceful fallbacks.
@@ -75,12 +78,16 @@ fetch [options]
 The logo is shown automatically when stdout is an interactive terminal at least
 74 columns wide; otherwise the plain text layout is used.
 
-## iOS notes
+## Tested platforms
 
-Tested on a jailbroken **iPad 4 (iPad3,4 / A6X / iOS 10.3.3, Darwin 16.7.0)**
-with `bash`, `gawk` and `bc` installed via Cydia. mini-fetch itself only needs
-the stock utilities (`sw_vers`, `sysctl`, `uname`, `ioreg`, `df`, `dpkg`,
-`ipconfig`, `vm_stat`, `tput`, `mktemp`, `sed`, `grep`).
+Tested on:
+
+- a jailbroken **iPad 4 (iPad3,4 / A6X / iOS 10.3.3, Darwin 16.7.0)** with
+  `bash`, `gawk` and `bc` installed via Cydia. mini-fetch itself only needs the
+  stock utilities (`sw_vers`, `sysctl`, `uname`, `ioreg`, `df`, `dpkg`,
+  `ipconfig`, `vm_stat`, `tput`, `mktemp`, `sed`, `grep`).
+- **postmarketOS** on a Xiaomi Redmi 5A (BusyBox `df`, `apk`, `lscpu`).
+- Ubuntu Linux (GNU coreutils).
 
 ## License
 
