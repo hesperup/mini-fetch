@@ -1,0 +1,547 @@
+#!/bin/sh
+# mini-fetch — a tiny, dependency-light system fetch (neofetch/fastfetch style)
+# Copyright (c) 2024 mini-fetch contributors — MIT License
+#
+# Designed to run on systems without awk/bc/perl: uses only POSIX sh and
+# stock system utilities. Primary target: legacy iOS devices (iPhone OS 10.x)
+# but falls back gracefully on Linux/BSD/macOS.
+#
+# Usage: fetch [--no-color] [--no-bar] [--version] [--help]
+
+VERSION="0.1.0"
+
+# ---------------------------------------------------------------------------
+# Options
+# ---------------------------------------------------------------------------
+use_color=1
+use_bar=1
+use_logo=""   # empty = auto (on for wide interactive terminals)
+
+for arg in "$@"; do
+    case $arg in
+        --no-color) use_color=0 ;;
+        --no-bar)   use_bar=0 ;;
+        --logo)     use_logo=1 ;;
+        --no-logo)  use_logo=0 ;;
+        -h|--help)
+            cat <<EOF
+mini-fetch $VERSION — tiny system info fetch
+
+Usage: fetch [options]
+
+Options:
+  --no-color   Disable ANSI colors
+  --no-bar     Disable progress bars
+  --logo       Show the side logo
+  --no-logo    Hide the side logo
+  -h, --help   Show this help
+  -v, --version  Show version
+EOF
+            exit 0 ;;
+        -v|--version) printf 'mini-fetch %s\n' "$VERSION"; exit 0 ;;
+    esac
+done
+
+if [ "$use_color" = 1 ] && [ -t 1 ]; then
+    E=$(printf '\033')
+else
+    E=
+fi
+RESET="${E}[0m"
+BOLD="${E}[1m"
+C_TITLE1="${E}[1;32m"   # user
+C_TITLE2="${E}[1;36m"   # @host
+C_KEY="${E}[1;36m"      # field names
+C_BAR="${E}[1;32m"      # bar fill
+C_BAR_EMPTY="${E}[0;90m" # bar track
+C_DIM="${E}[0;90m"
+C_LOGO="${E}[1;32m"
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+has() { command -v "$1" >/dev/null 2>&1; }
+
+# integer division with one decimal place, without bc/awk
+idiv1() { printf '%d.%d' $(( $1 / $2 )) $(( ($1 % $2) * 10 / $2 )); }
+
+# field <name> <value>   — prints an aligned "Name      value" line
+field() {
+    printf '%s%-10s%s%s\n' "$C_KEY" "$1" "$RESET" "$2"
+}
+
+# bar <value> <max> [width] — prints a colored progress bar
+bar() {
+    _v=$1 _m=$2 _w=${3:-14}
+    [ "$_m" -gt 0 ] 2>/dev/null || { printf ''; return; }
+    _fill=$(( _v * _w / _m ))
+    [ "$_fill" -lt 0 ] && _fill=0
+    [ "$_fill" -gt "$_w" ] && _fill=$_w
+    _i=0 _out=
+    while [ "$_i" -lt "$_fill" ]; do
+        _out="${_out}${C_BAR}█"
+        _i=$(( _i + 1 ))
+    done
+    while [ "$_i" -lt "$_w" ]; do
+        _out="${_out}${C_BAR_EMPTY}░"
+        _i=$(( _i + 1 ))
+    done
+    printf '%s%s ' "$_out" "$RESET"
+}
+
+# ---------------------------------------------------------------------------
+# OS / platform detection
+# ---------------------------------------------------------------------------
+os_name=$(sw_vers -productName 2>/dev/null)
+os_ver=$(sw_vers -productVersion 2>/dev/null)
+os_build=$(sw_vers -buildVersion 2>/dev/null)
+
+kernel=$(uname -s)
+if [ -n "$os_name" ]; then
+    # Darwin with sw_vers: iOS or macOS
+    case $os_name in
+        "iPhone OS") platform=ios ;;
+        *)           platform=macos ;;
+    esac
+elif [ "$kernel" = "Linux" ]; then
+    platform=linux
+    if [ -r /etc/os-release ]; then
+        os_name=$(sed -n 's/^NAME=//p' /etc/os-release | tr -d '"' | head -n1)
+        os_ver=$(sed -n 's/^VERSION_ID=//p' /etc/os-release | tr -d '"' | head -n1)
+    fi
+    [ -z "$os_name" ] && os_name=Linux
+else
+    platform=other
+    os_name=$kernel
+fi
+
+machine=$(uname -n)
+kernel_ver=$(uname -r)
+arch=$(uname -m)
+user=$(id -un 2>/dev/null || echo unknown)
+
+# ---------------------------------------------------------------------------
+# Host / device model
+# ---------------------------------------------------------------------------
+host=""
+case $platform in
+    ios)
+        # arch is like "iPad3,4"; map to a friendly name
+        case $arch in
+            iPhone1,1|iPhone1,2) host="iPhone (original)" ;;
+            iPhone2,1)          host="iPhone 3GS" ;;
+            iPhone3,1|iPhone3,2|iPhone3,3) host="iPhone 4" ;;
+            iPhone4,1)          host="iPhone 4S" ;;
+            iPhone5,1|iPhone5,2) host="iPhone 5" ;;
+            iPhone5,3|iPhone5,4) host="iPhone 5c" ;;
+            iPhone6,1|iPhone6,2) host="iPhone 5s" ;;
+            iPhone7,1)          host="iPhone 6 Plus" ;;
+            iPhone7,2)          host="iPhone 6" ;;
+            iPhone8,1)          host="iPhone 6s" ;;
+            iPhone8,2)          host="iPhone 6s Plus" ;;
+            iPhone8,4)          host="iPhone SE" ;;
+            iPhone9,1|iPhone9,3) host="iPhone 7" ;;
+            iPhone9,2|iPhone9,4) host="iPhone 7 Plus" ;;
+            iPhone10,1|iPhone10,4) host="iPhone 8" ;;
+            iPhone10,2|iPhone10,5) host="iPhone 8 Plus" ;;
+            iPhone10,3|iPhone10,6) host="iPhone X" ;;
+            iPod1,1)            host="iPod touch (1G)" ;;
+            iPod2,1)            host="iPod touch (2G)" ;;
+            iPod3,1)            host="iPod touch (3G)" ;;
+            iPod4,1)            host="iPod touch (4G)" ;;
+            iPod5,1)            host="iPod touch (5G)" ;;
+            iPod7,1)            host="iPod touch (6G)" ;;
+            iPad1,1)            host="iPad (1G)" ;;
+            iPad2,1|iPad2,2|iPad2,3|iPad2,4) host="iPad 2" ;;
+            iPad2,5|iPad2,6|iPad2,7) host="iPad mini" ;;
+            iPad3,1|iPad3,2|iPad3,3) host="iPad (3G)" ;;
+            iPad3,4|iPad3,5|iPad3,6) host="iPad 4" ;;
+            iPad4,1|iPad4,2|iPad4,3) host="iPad Air" ;;
+            iPad4,4|iPad4,5|iPad4,6) host="iPad mini 2" ;;
+            iPad4,7|iPad4,8|iPad4,9) host="iPad mini 3" ;;
+            iPad5,1|iPad5,2)    host="iPad mini 4" ;;
+            iPad5,3|iPad5,4)    host="iPad Air 2" ;;
+            iPad6,3|iPad6,4)    host="iPad Pro (9.7\")" ;;
+            iPad6,7|iPad6,8)    host="iPad Pro (12.9\")" ;;
+            iPad6,11|iPad6,12)  host="iPad (5G)" ;;
+            iPad7,1|iPad7,2)    host="iPad Pro (12.9\" 2G)" ;;
+            iPad7,3|iPad7,4)    host="iPad Pro (10.5\")" ;;
+            iPad7,5|iPad7,6)    host="iPad (6G)" ;;
+            *)                  host="$arch" ;;
+        esac
+        ;;
+    macos)
+        host=$(sysctl -n hw.model 2>/dev/null)
+        [ "$host" = "$arch" ] && host=""
+        ;;
+    linux)
+        if [ -r /sys/devices/virtual/dmi/id/product_name ]; then
+            host=$(cat /sys/devices/virtual/dmi/id/product_name 2>/dev/null)
+        elif [ -r /sys/firmware/devicetree/base/model ]; then
+            host=$(tr -d '\0' < /sys/firmware/devicetree/base/model 2>/dev/null)
+        fi
+        ;;
+esac
+
+# ---------------------------------------------------------------------------
+# CPU
+# ---------------------------------------------------------------------------
+case $platform in
+    ios)
+        case $arch in
+            iPhone1,1|iPhone1,2|iPod1,1) cpu="Samsung S5L8900 (1) @ 412MHz" ;;
+            iPhone2,1)          cpu="Samsung S5PC100 (1) @ 600MHz" ;;
+            iPhone3,1|iPhone3,2|iPhone3,3|iPod4,1) cpu="Apple A4 (1) @ 800MHz" ;;
+            iPhone4,1|iPod5,1)  cpu="Apple A5 (2) @ 800MHz" ;;
+            iPhone5,1|iPhone5,2|iPhone5,3|iPhone5,4) cpu="Apple A6 (2) @ 1.3GHz" ;;
+            iPhone6,1|iPhone6,2) cpu="Apple A7 (2) @ 1.3GHz" ;;
+            iPhone7,1|iPhone7,2) cpu="Apple A8 (2) @ 1.4GHz" ;;
+            iPhone8,1|iPhone8,2|iPhone8,4|iPad6,11|iPad6,12) cpu="Apple A9 (2) @ 1.85GHz" ;;
+            iPhone9,1|iPhone9,2|iPhone9,3|iPhone9,4|iPad7,5|iPad7,6|iPad7,1|iPad7,2) cpu="Apple A10 Fusion (4) @ 2.34GHz" ;;
+            iPhone10,1|iPhone10,2|iPhone10,3|iPhone10,4|iPhone10,5|iPhone10,6) cpu="Apple A11 Bionic (6) @ 2.39GHz" ;;
+            iPhone11,2|iPhone11,4|iPhone11,6|iPhone11,8|iPad11,1|iPad11,2|iPad11,3|iPad11,4|iPad11,6|iPad11,7) cpu="Apple A12 Bionic (6) @ 2.49GHz" ;;
+            iPhone12,1|iPhone12,3|iPhone12,5|iPhone12,8) cpu="Apple A13 Bionic (6) @ 2.65GHz" ;;
+            iPhone13,1|iPhone13,2|iPhone13,3|iPhone13,4|iPad13,1|iPad13,2) cpu="Apple A14 Bionic (6) @ 3.00GHz" ;;
+            iPod2,1)            cpu="Samsung S5L8720 (1) @ 533MHz" ;;
+            iPod3,1)            cpu="Samsung S5L8922 (1) @ 600MHz" ;;
+            iPod7,1)            cpu="Apple A8 (2) @ 1.1GHz" ;;
+            iPad1,1)            cpu="Apple A4 (1) @ 1GHz" ;;
+            iPad2,1|iPad2,2|iPad2,3|iPad2,4|iPad2,5|iPad2,6|iPad2,7) cpu="Apple A5 (2) @ 1GHz" ;;
+            iPad3,1|iPad3,2|iPad3,3) cpu="Apple A5X (2) @ 1GHz" ;;
+            iPad3,4|iPad3,5|iPad3,6) cpu="Apple A6X (2) @ 1.4GHz" ;;
+            iPad4,1|iPad4,2|iPad4,3|iPad4,4|iPad4,5|iPad4,6|iPad4,7|iPad4,8|iPad4,9) cpu="Apple A7 (2) @ 1.4GHz" ;;
+            iPad5,1|iPad5,2|iPad5,3|iPad5,4) cpu="Apple A8X (3) @ 1.5GHz" ;;
+            iPad6,3|iPad6,4|iPad6,7|iPad6,8) cpu="Apple A9X (2) @ 2.26GHz" ;;
+            *)                  cpu="Apple SoC ($(sysctl -n hw.ncpu 2>/dev/null))" ;;
+        esac
+        ;;
+    macos|linux|other)
+        if has sysctl && sysctl -n machdep.cpu.brand_string >/dev/null 2>&1; then
+            cpu=$(sysctl -n machdep.cpu.brand_string 2>/dev/null)
+            cpu="$cpu ($(sysctl -n hw.ncpu 2>/dev/null))"
+        elif [ -r /proc/cpuinfo ]; then
+            cpu=$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -n1)
+            [ -z "$cpu" ] && cpu=$(sed -n 's/^Hardware[[:space:]]*: //p' /proc/cpuinfo | head -n1)
+            [ -n "$cpu" ] && cpu="$cpu ($(grep -c '^processor' /proc/cpuinfo))"
+        fi
+        [ -z "$cpu" ] && cpu="$arch"
+        ;;
+esac
+
+# ---------------------------------------------------------------------------
+# GPU
+# ---------------------------------------------------------------------------
+case $platform in
+    ios)
+        case $arch in
+            iPhone1,1|iPhone1,2) gpu="PowerVR MBX Lite 3D" ;;
+            iPhone2,1|iPhone3,1|iPhone3,2|iPhone3,3|iPod3,1|iPod4,1|iPad1,1) gpu="PowerVR SGX535" ;;
+            iPhone4,1|iPad2,1|iPad2,2|iPad2,3|iPad2,4|iPad2,5|iPad2,6|iPad2,7|iPod5,1) gpu="PowerVR SGX543MP2" ;;
+            iPhone5,1|iPhone5,2|iPhone5,3|iPhone5,4) gpu="PowerVR SGX543MP3" ;;
+            iPhone6,1|iPhone6,2|iPad4,1|iPad4,2|iPad4,3|iPad4,4|iPad4,5|iPad4,6|iPad4,7|iPad4,8|iPad4,9) gpu="PowerVR G6430" ;;
+            iPhone7,1|iPhone7,2|iPod7,1|iPad5,1|iPad5,2) gpu="PowerVR GX6450" ;;
+            iPhone8,1|iPhone8,2|iPhone8,4|iPad6,11|iPad6,12) gpu="PowerVR GT7600" ;;
+            iPhone9,1|iPhone9,2|iPhone9,3|iPhone9,4|iPad7,5|iPad7,6) gpu="PowerVR GT7600 Plus" ;;
+            iPhone10,1|iPhone10,2|iPhone10,3|iPhone10,4|iPhone10,5|iPhone10,6) gpu="Apple Designed GPU (A11)" ;;
+            iPhone11,2|iPhone11,4|iPhone11,6|iPhone11,8|iPad11,6|iPad11,7) gpu="Apple Designed GPU (A12)" ;;
+            iPhone12,1|iPhone12,3|iPhone12,5|iPhone12,8) gpu="Apple Designed GPU (A13)" ;;
+            iPhone13,1|iPhone13,2|iPhone13,3|iPhone13,4|iPad13,1|iPad13,2) gpu="Apple Designed GPU (A14)" ;;
+            iPad3,1|iPad3,2|iPad3,3) gpu="PowerVR SGX534MP4" ;;
+            iPad3,4|iPad3,5|iPad3,6) gpu="PowerVR SGX554MP4" ;;
+            iPad5,3|iPad5,4)    gpu="PowerVR GXA6850" ;;
+            iPad6,3|iPad6,4|iPad6,7|iPad6,8) gpu="PowerVR 12-cluster (A9X)" ;;
+            *)                  gpu="" ;;
+        esac
+        ;;
+esac
+
+# ---------------------------------------------------------------------------
+# Uptime
+# ---------------------------------------------------------------------------
+uptime_str=""
+if [ -r /proc/uptime ]; then
+    secs=$(cut -d' ' -f1 /proc/uptime | cut -d'.' -f1)
+else
+    boot=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*{ sec = \([0-9]*\).*/\1/p')
+    now=$(date +%s 2>/dev/null)
+    if [ -n "$boot" ] && [ -n "$now" ]; then
+        secs=$(( now - boot ))
+    fi
+fi
+if [ -n "$secs" ]; then
+    days=$(( secs / 86400 ))
+    hours=$(( (secs % 86400) / 3600 ))
+    mins=$(( (secs % 3600) / 60 ))
+    if [ "$days" -gt 0 ]; then
+        uptime_str="${days}d ${hours}h ${mins}m"
+    elif [ "$hours" -gt 0 ]; then
+        uptime_str="${hours}h ${mins}m"
+    else
+        uptime_str="${mins}m"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Shell / terminal
+# ---------------------------------------------------------------------------
+shell=$(basename "${SHELL:-sh}" 2>/dev/null)
+terminal=$(tty 2>/dev/null)
+[ -z "$terminal" ] && terminal="(none)"
+
+# ---------------------------------------------------------------------------
+# Packages
+# ---------------------------------------------------------------------------
+packages=""
+if has dpkg; then
+    n=$(dpkg -l 2>/dev/null | grep -c '^ii')
+    [ "$n" -gt 0 ] && packages="$n (dpkg)"
+elif has rpm; then
+    n=$(rpm -qa 2>/dev/null | wc -l | tr -d ' ')
+    [ "$n" -gt 0 ] && packages="$n (rpm)"
+elif has pacman; then
+    n=$(pacman -Q 2>/dev/null | wc -l | tr -d ' ')
+    [ "$n" -gt 0 ] && packages="$n (pacman)"
+elif has dnf; then
+    n=$(dnf list installed 2>/dev/null | wc -l | tr -d ' ')
+    [ "$n" -gt 0 ] && packages="$n (dnf)"
+elif has brew; then
+    n=$(ls -1 "$(brew --prefix)/Cellar" 2>/dev/null | wc -l | tr -d ' ')
+    [ "$n" -gt 0 ] && packages="$n (brew)"
+fi
+
+# ---------------------------------------------------------------------------
+# Memory
+# ---------------------------------------------------------------------------
+mem_total= mem_used=
+case $platform in
+    ios|macos)
+        if has sysctl; then
+            pagesize=$(sysctl -n hw.pagesize 2>/dev/null)
+            memsize=$(sysctl -n hw.memsize 2>/dev/null)
+            if [ -n "$pagesize" ] && [ -n "$memsize" ]; then
+                mem_total=$(( memsize / 1024 / 1024 ))
+                pages_app=0
+                if has vm_stat; then
+                    pa=$(sysctl -n vm.page_pageable_internal_count 2>/dev/null)
+                    pp=$(sysctl -n vm.page_purgeable_count 2>/dev/null)
+                    [ -n "$pa" ] && pages_app=$(( pa - pp ))
+                    wired=$(vm_stat 2>/dev/null | sed -n 's/.*wired[^0-9]*\([0-9][0-9.]*\).*/\1/p')
+                    comp=$(vm_stat 2>/dev/null | sed -n 's/.*occupied[^0-9]*\([0-9][0-9.]*\).*/\1/p')
+                    wired=${wired%.}; [ -z "$wired" ] && wired=0
+                    comp=${comp%.};  [ -z "$comp" ] && comp=0
+                    mem_used=$(( (pages_app + wired + comp) * pagesize / 1024 / 1024 ))
+                fi
+            fi
+        fi
+        ;;
+    linux)
+        if [ -r /proc/meminfo ]; then
+            mt=$(sed -n 's/^MemTotal:[[:space:]]*\([0-9]*\).*/\1/p' /proc/meminfo)
+            ma=$(sed -n 's/^MemAvailable:[[:space:]]*\([0-9]*\).*/\1/p' /proc/meminfo)
+            mem_total=$(( mt / 1024 ))
+            [ -n "$ma" ] && mem_used=$(( (mt - ma) / 1024 ))
+        fi
+        ;;
+esac
+
+# ---------------------------------------------------------------------------
+# Battery
+# ---------------------------------------------------------------------------
+battery= bat_pct=
+case $platform in
+    ios)
+        if has ioreg; then
+            iog=$(ioreg -w0 -l 2>/dev/null | grep -E '"CurrentCapacity"|"MaxCapacity"|"CycleCount"|"IsCharging"')
+            cur=$(printf '%s\n' "$iog" | sed -n 's/.*"CurrentCapacity" = \([0-9]*\).*/\1/p' | head -n1)
+            max=$(printf '%s\n' "$iog" | sed -n 's/.*"MaxCapacity" = \([0-9]*\).*/\1/p' | head -n1)
+            cyc=$(printf '%s\n' "$iog" | sed -n 's/.*"CycleCount" = \([0-9]*\).*/\1/p' | head -n1)
+            chg=$(printf '%s\n' "$iog" | sed -n 's/.*"IsCharging" = \(.*\)/\1/p' | head -n1)
+            if [ -n "$cur" ] && [ -n "$max" ] && [ "$max" -gt 0 ] 2>/dev/null; then
+                bat_pct=$(( cur * 100 / max ))
+                battery="${bat_pct}%"
+                [ -n "$cyc" ] && battery="$battery (${cyc} cycles)"
+                [ "$chg" = "Yes" ] && battery="$battery [charging]"
+            fi
+        fi
+        ;;
+    linux)
+        for b in /sys/class/power_supply/BAT*; do
+            [ -r "$b/capacity" ] || continue
+            bat_pct=$(cat "$b/capacity")
+            st=$(cat "$b/status" 2>/dev/null)
+            battery="${bat_pct}% [${st}]"
+            break
+        done
+        ;;
+    macos)
+        if has pmset; then
+            battery=$(pmset -g batt 2>/dev/null | sed -n 's/.*[[:space:]]\([0-9]*%\).*/\1/p' | head -n1)
+            bat_pct=${battery%\%}
+        fi
+        ;;
+esac
+
+# ---------------------------------------------------------------------------
+# Disk
+# ---------------------------------------------------------------------------
+disk=
+if df -k / >/dev/null 2>&1; then
+    set -- $(df -k / | sed -n '2p')
+    d_total=$2  d_used=$3  d_cap=$5
+    if [ -n "$d_total" ] && [ "$d_total" -gt 0 ] 2>/dev/null; then
+        d_total_g=$(idiv1 "$d_total" 1048576)
+        d_used_g=$(idiv1 "$d_used" 1048576)
+        disk="${d_used_g}GiB / ${d_total_g}GiB (${d_cap})"
+        d_pct=${d_cap%\%}
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# IP address
+# ---------------------------------------------------------------------------
+ip=""
+case $platform in
+    ios|macos)
+        if has ipconfig; then
+            iface=$(route -n get default 2>/dev/null | sed -n 's/.*interface: //p' | head -n1)
+            [ -z "$iface" ] && iface=en0
+            ip=$(ipconfig getifaddr "$iface" 2>/dev/null)
+        fi
+        ;;
+    linux)
+        if has ip; then
+            ip=$(ip -4 addr show scope global 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -n1)
+        fi
+        ;;
+esac
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+emit_info() {
+printf '%s%s%s%s@%s%s%s\n' \
+    "$C_TITLE1" "$user" "$RESET" "$C_TITLE2" "$machine" "$RESET" ""
+title="$user@$machine"
+# separator line
+sep=$(printf '%*s' "${#title}" '' | sed 's/ /─/g')
+printf '%s%s%s\n' "$C_DIM" "$sep" "$RESET"
+
+os_line="$os_name"
+[ -n "$os_ver" ] && os_line="$os_line $os_ver"
+[ -n "$os_build" ] && os_line="$os_line ($os_build)"
+[ -n "$arch" ] && os_line="$os_line $arch"
+field "OS" "$os_line"
+
+host_line="$host"
+[ -n "$host_line" ] && field "Host" "$host_line"
+
+field "Kernel" "$kernel_ver"
+[ -n "$uptime_str" ] && field "Uptime" "$uptime_str"
+[ -n "$packages" ] && field "Packages" "$packages"
+[ -n "$shell" ] && field "Shell" "$shell"
+field "Terminal" "$terminal"
+
+[ -n "$cpu" ] && field "CPU" "$cpu"
+[ -n "$gpu" ] && field "GPU" "$gpu"
+
+if [ -n "$mem_total" ]; then
+    if [ "$use_bar" = 1 ] && [ -n "$mem_used" ]; then
+        mb=$(bar "$mem_used" "$mem_total" 14)
+        field "Memory" "${mb}${mem_used}MiB / ${mem_total}MiB"
+    else
+        field "Memory" "${mem_used}MiB / ${mem_total}MiB"
+    fi
+fi
+
+if [ -n "$battery" ]; then
+    if [ "$use_bar" = 1 ] && [ -n "$bat_pct" ]; then
+        bb=$(bar "$bat_pct" 100 14)
+        field "Battery" "${bb}${battery}"
+    else
+        field "Battery" "$battery"
+    fi
+fi
+
+if [ -n "$disk" ]; then
+    if [ "$use_bar" = 1 ] && [ -n "$d_pct" ]; then
+        db=$(bar "$d_pct" 100 14)
+        field "Disk" "${db}${disk}"
+    else
+        field "Disk" "$disk"
+    fi
+fi
+
+[ -n "$ip" ] && field "Local IP" "$ip"
+}
+
+# ---------------------------------------------------------------------------
+# Side logo (fastfetch style)
+# ---------------------------------------------------------------------------
+logo_art=$(cat <<'LOGO'
+                    c.'
+                 ,xNMM.
+               .OMMMMo
+               lMMM"
+     .;loddo:.  .olloddol;.
+   cKMMMMMMMMMMNWMMMMMMMMMM0:
+ .KMMMMMMMMMMMMMMMMMMMMMMMWd.
+ XMMMMMMMMMMMMMMMMMMMMMMMX.
+;MMMMMMMMMMMMMMMMMMMMMMMM:
+:MMMMMMMMMMMMMMMMMMMMMMMM:
+.MMMMMMMMMMMMMMMMMMMMMMMMX.
+ kMMMMMMMMMMMMMMMMMMMMMMMMWd.
+ 'XMMMMMMMMMMMMMMMMMMMMMMMMMMk
+  'XMMMMMMMMMMMMMMMMMMMMMMMMK.
+    kMMMMMMMMMMMMMMMMMMMMMMd
+     ;KMMMMMMMWXXWMMMMMMMk.
+       "cooc*"    "*coo'
+LOGO
+)
+
+# Resolve auto logo setting.
+if [ -z "$use_logo" ]; then
+    if [ "$use_color" = 1 ] && [ -t 1 ]; then
+        cols=$(tput cols 2>/dev/null)
+        [ -z "$cols" ] && cols=80
+        [ "$cols" -ge 74 ] 2>/dev/null && use_logo=1 || use_logo=0
+    else
+        use_logo=0
+    fi
+fi
+
+if [ "$use_logo" = 1 ] && has mktemp; then
+    logof=$(mktemp "${TMPDIR:-/tmp}/minifetch.logo.XXXXXX")
+    infof=$(mktemp "${TMPDIR:-/tmp}/minifetch.info.XXXXXX")
+fi
+
+if [ -n "$infof" ]; then
+    emit_info > "$infof"
+    printf '%s\n' "$logo_art" > "$logof"
+
+    # widest visible logo line
+    logow=0
+    IFS='
+'
+    for l in $logo_art; do
+        n=${#l}
+        [ "$n" -gt "$logow" ] && logow=$n
+    done
+    unset IFS
+
+    exec 3<"$logof"
+    exec 4<"$infof"
+    while IFS= read -r l <&3; do
+        if IFS= read -r i <&4; then :; else i=; fi
+        printf '%s%s%s' "$C_LOGO" "$l" "$RESET"
+        printf '%*s' $(( logow - ${#l} + 2 )) ''
+        printf '%s\n' "$i"
+    done
+    while IFS= read -r i <&4; do
+        printf '%*s  %s\n' $(( logow + 2 )) '' "$i"
+    done
+    exec 3<&-
+    exec 4<&-
+    rm -f "$logof" "$infof"
+else
+    emit_info
+fi
